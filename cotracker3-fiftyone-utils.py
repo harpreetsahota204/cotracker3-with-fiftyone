@@ -2,6 +2,7 @@ import torch
 import imageio
 import numpy as np
 import fiftyone as fo
+import tqdm 
 
 def read_video_from_path(path):
     """
@@ -18,7 +19,7 @@ def read_video_from_path(path):
     # Stack frames, convert to torch tensor, and rearrange dimensions
     return torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2)[None].float()
 
-def process_batch(batch, model, device):
+def process_batch(batch, model, device, grid_size=30):
     """
     Process a batch of video samples using the CoTracker model.
     
@@ -26,6 +27,7 @@ def process_batch(batch, model, device):
         batch (list): List of FiftyOne samples
         model (torch.nn.Module): CoTracker model
         device (str): Device to run inference on ('cuda' or 'cpu')
+        grid_size (int): Grid size for CoTracker (default: 30)
     
     Returns:
         tuple: Predicted tracks and visibility for the batch
@@ -35,7 +37,7 @@ def process_batch(batch, model, device):
     
     # Run inference without computing gradients
     with torch.no_grad():
-        pred_tracks, pred_visibility = model(videos, grid_size=30)
+        pred_tracks, pred_visibility = model(videos, queries=None, grid_size=grid_size)
     
     # Move results to CPU and convert to numpy arrays
     return pred_tracks.cpu().numpy(), pred_visibility.cpu().numpy()
@@ -81,7 +83,7 @@ def create_keypoints_batch(pred_tracks, pred_visibility, samples):
         # Save the updated sample
         sample.save()
 
-def main(dataset, device='cuda', batch_size=4):
+def main(dataset, device='cuda', batch_size=4, grid_size=30):
     """
     Main function to process the entire dataset.
     
@@ -89,6 +91,7 @@ def main(dataset, device='cuda', batch_size=4):
         dataset (fo.Dataset): FiftyOne dataset to process
         device (str): Device to run inference on ('cuda' or 'cpu')
         batch_size (int): Number of samples to process in each batch
+        grid_size (int): Grid size for CoTracker (default: 30)
     """
     # Load the CoTracker model
     model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline").to(device)
@@ -99,7 +102,7 @@ def main(dataset, device='cuda', batch_size=4):
         batch = samples[i:i+batch_size]
         # Process the batch using the CoTracker model
         # Returns predicted tracks and visibility for all frames in the batch
-        pred_tracks, pred_visibility = process_batch(batch, model, device)
+        pred_tracks, pred_visibility = process_batch(batch, model, device, grid_size)
         # Create and add keypoints to the samples in the current batch
         # This updates the FiftyOne dataset with the new keypoint information
         create_keypoints_batch(pred_tracks, pred_visibility, batch)
