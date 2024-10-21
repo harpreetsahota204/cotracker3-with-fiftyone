@@ -1,8 +1,30 @@
+"""
+CoTracker Keypoint Extraction for FiftyOne Datasets
+
+This script processes video samples in a FiftyOne dataset using the CoTracker model
+to extract keypoints for each frame. The extracted keypoints are then added to the
+dataset as a new field for each frame.
+
+Usage:
+1. Ensure you have the required libraries installed: torch, imageio, numpy, fiftyone
+2. Make sure your FiftyOne dataset is properly set up with video samples
+3. Run the script with your dataset:
+
+   import fiftyone as fo
+   dataset = fo.load_dataset("your_dataset_name")
+   main(dataset)
+
+4. After running, the dataset will be updated with new 'tracked_keypoints' fields
+   for each frame in each video sample.
+
+Note: This script requires a CUDA-capable GPU for optimal performance.
+"""
+
 import torch
 import imageio
 import numpy as np
 import fiftyone as fo
-import tqdm 
+from tqdm import tqdm 
 
 def read_video_from_path(path):
     """
@@ -30,34 +52,39 @@ def process_batch(batch, model, device, grid_size=30):
         grid_size (int): Grid size for CoTracker (default: 30)
     
     Returns:
-        tuple: Predicted tracks and visibility for the batch
+        list: List of tuples containing predicted tracks and visibility for each sample
     """
-    # Concatenate video tensors from all samples in the batch
-    videos = torch.cat([read_video_from_path(sample.filepath).to(device) for sample in batch])
+    results = []
+    for sample in batch:
+        video = read_video_from_path(sample.filepath).to(device)
+        
+        # Run inference without computing gradients
+        with torch.no_grad():
+            pred_tracks, pred_visibility = model(video, queries=None, grid_size=grid_size)
+        
+        # Move results to CPU and convert to numpy arrays
+        results.append((pred_tracks.cpu().numpy(), pred_visibility.cpu().numpy()))
     
-    # Run inference without computing gradients
-    with torch.no_grad():
-        pred_tracks, pred_visibility = model(videos, queries=None, grid_size=grid_size)
-    
-    # Move results to CPU and convert to numpy arrays
-    return pred_tracks.cpu().numpy(), pred_visibility.cpu().numpy()
+    return results
 
-
-def create_keypoints_batch(pred_tracks, pred_visibility, samples):
+def create_keypoints_batch(results, samples):
     """
     Create and add keypoints to a batch of samples.
     
     Args:
-        pred_tracks (np.array): Predicted tracks for the batch
-        pred_visibility (np.array): Predicted visibility for the batch
+        results (list): List of tuples containing predicted tracks and visibility for each sample
         samples (list): List of FiftyOne samples
     """
-    for i, sample in enumerate(samples):
+    for (pred_tracks, pred_visibility), sample in zip(results, samples):
         height, width = sample.metadata.frame_height, sample.metadata.frame_width
         
+        # Remove the batch dimension (which is now always 1)
+        pred_tracks = pred_tracks.squeeze(0)
+        pred_visibility = pred_visibility.squeeze(0)
+        
         # Normalize coordinates to [0, 1] range
-        pred_tracks[i, :, :, 0] /= width
-        pred_tracks[i, :, :, 1] /= height
+        pred_tracks[:, :, 0] /= width
+        pred_tracks[:, :, 1] /= height
         
         # Dictionary to hold keypoints for all frames
         frames_keypoints = {}
@@ -66,17 +93,17 @@ def create_keypoints_batch(pred_tracks, pred_visibility, samples):
         for frame_number in range(sample.metadata.total_frame_count):
             keypoints = []
             # Iterate through each tracked point
-            for point_idx in range(pred_tracks.shape[2]):
+            for point_idx in range(pred_tracks.shape[1]):
                 # Only add keypoint if it's visible in this frame
-                if pred_visibility[i, frame_number, point_idx]:
+                if pred_visibility[frame_number, point_idx]:
                     # Extract x, y coordinates and convert to float
-                    x, y = map(float, pred_tracks[i, frame_number, point_idx])
+                    x, y = map(float, pred_tracks[frame_number, point_idx])
                     # Create a FiftyOne Keypoint object and add to list
                     keypoints.append(fo.Keypoint(points=[(x, y)], index=point_idx))
             
             # Add keypoints to the frame dictionary
             frames_keypoints[frame_number + 1] = fo.Keypoints(keypoints=keypoints)
-        
+            
         # Add all frames' keypoints to the sample at once
         sample.frames.merge({f: {"tracked_keypoints": kp} for f, kp in frames_keypoints.items()})
         
@@ -99,13 +126,14 @@ def main(dataset, device='cuda', batch_size=4, grid_size=30):
 
     samples = list(dataset)
     for i in tqdm(range(0, len(samples), batch_size), desc="Processing batches"):
+        torch.cuda.empty_cache()
         batch = samples[i:i+batch_size]
         # Process the batch using the CoTracker model
         # Returns predicted tracks and visibility for all frames in the batch
-        pred_tracks, pred_visibility = process_batch(batch, model, device, grid_size)
+        results = process_batch(batch, model, device, grid_size)
         # Create and add keypoints to the samples in the current batch
         # This updates the FiftyOne dataset with the new keypoint information
-        create_keypoints_batch(pred_tracks, pred_visibility, batch)
+        create_keypoints_batch(results, batch)
 
     # Reload the dataset to reflect changes
     dataset.reload()
