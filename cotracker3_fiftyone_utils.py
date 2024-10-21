@@ -69,6 +69,7 @@ def process_batch(batch, model, device, grid_size=30):
 
     return results
 
+
 def create_keypoints_batch(results, samples):
     """
     Create and add keypoints to a batch of samples.
@@ -78,35 +79,42 @@ def create_keypoints_batch(results, samples):
         samples (list): List of FiftyOne samples
     """
     for (pred_tracks, pred_visibility), sample in zip(results, samples):
+        # Extract frame dimensions from sample metadata
         height, width = sample.metadata.frame_height, sample.metadata.frame_width
         
-        # Remove the batch dimension (which is now always 1)
-        pred_tracks = pred_tracks.squeeze(0)
-        pred_visibility = pred_visibility.squeeze(0)
+        # Remove the batch dimension (which is now always 1) and ensure we're working with numpy arrays
+        if isinstance(pred_tracks, torch.Tensor):
+            pred_tracks = pred_tracks.squeeze(0).cpu().numpy()
+        else:
+            pred_tracks = np.squeeze(pred_tracks, axis=0)
+        
+        if isinstance(pred_visibility, torch.Tensor):
+            pred_visibility = pred_visibility.squeeze(0).cpu().numpy()
+        else:
+            pred_visibility = np.squeeze(pred_visibility, axis=0)
         
         # Normalize coordinates to [0, 1] range
         pred_tracks[:, :, 0] /= width
         pred_tracks[:, :, 1] /= height
         
-        # Dictionary to hold keypoints for all frames
-        frames_keypoints = {}
+        # Pre-compute frame range
+        # Add 1 to total_frame_count because range is exclusive of the last number
+        frame_range = range(1, sample.metadata.total_frame_count + 1)
         
-        # Iterate through each frame in the video
-        for frame_number in range(sample.metadata.total_frame_count):
-            keypoints = []
-            # Iterate through each tracked point
-            for point_idx in range(pred_tracks.shape[1]):
-                # Only add keypoint if it's visible in this frame
-                if pred_visibility[frame_number, point_idx]:
-                    # Extract x, y coordinates and convert to float
-                    x, y = map(float, pred_tracks[frame_number, point_idx])
-                    # Create a FiftyOne Keypoint object and add to list
-                    keypoints.append(fo.Keypoint(points=[(x, y)], index=point_idx))
-            
-            # Add keypoints to the frame dictionary
-            frames_keypoints[frame_number + 1] = fo.Keypoints(keypoints=keypoints)
-            
+        frames_keypoints = {
+            frame_number: fo.Keypoints(keypoints=[
+                # Create a Keypoint object for each visible point
+                fo.Keypoint(points=[(float(x), float(y))], index=point_idx)
+                for point_idx, (x, y) in enumerate(pred_tracks[frame_number - 1])
+                # Only include keypoints that are visible in this frame
+                if pred_visibility[frame_number - 1, point_idx]
+            ])
+            for frame_number in frame_range
+        }
+        
         # Add all frames' keypoints to the sample at once
+        # This creates a dictionary where keys are frame numbers and values are
+        # dictionaries containing the tracked_keypoints
         sample.frames.merge({f: {"tracked_keypoints": kp} for f, kp in frames_keypoints.items()})
         
         # Save the updated sample
