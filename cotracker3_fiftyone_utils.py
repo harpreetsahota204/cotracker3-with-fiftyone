@@ -64,7 +64,9 @@ def process_batch(batch, model, device, grid_size=30):
         
         # Move results to CPU and convert to numpy arrays
         results.append((pred_tracks.cpu().numpy(), pred_visibility.cpu().numpy()))
-    
+
+    torch.cuda.empty_cache()
+
     return results
 
 def create_keypoints_batch(results, samples):
@@ -126,7 +128,6 @@ def main(dataset, device='cuda', batch_size=4, grid_size=30):
 
     samples = list(dataset)
     for i in tqdm(range(0, len(samples), batch_size), desc="Processing batches"):
-        torch.cuda.empty_cache()
         batch = samples[i:i+batch_size]
         # Process the batch using the CoTracker model
         # Returns predicted tracks and visibility for all frames in the batch
@@ -135,6 +136,7 @@ def main(dataset, device='cuda', batch_size=4, grid_size=30):
         # This updates the FiftyOne dataset with the new keypoint information
         create_keypoints_batch(results, batch)
 
+    torch.cuda.empty_cache()
     # Reload the dataset to reflect changes
     dataset.reload()
     print("Processing complete. Updated dataset info:")
